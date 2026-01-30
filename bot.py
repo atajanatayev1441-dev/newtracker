@@ -2,71 +2,66 @@ import asyncio
 import logging
 import sqlite3
 import os
+import csv
+import sys
+import matplotlib.pyplot as plt
+import speech_recognition as sr
+from datetime import datetime
+from pydub import AudioSegment
+
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-# Настройки
+# --- ПРОВЕРКА ТОКЕНА ---
 TOKEN = os.getenv("BOT_TOKEN")
+
+if not TOKEN:
+    logging.error("❌ ОШИБКА: Токен не найден в переменных окружения Railway (BOT_TOKEN)!")
+    # Если на сервере пусто, бот просто не запустится и выдаст понятную ошибку
+    sys.exit("Error: BOT_TOKEN variable is missing. Check Railway Variables tab.")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+recognizer = sr.Recognizer()
 
 class Setup(StatesGroup):
     choosing_currency = State()
 
-# --- КЛАВИАТУРЫ (Вынес отдельно для надежности) ---
+# --- БАЗА ДАННЫХ ---
+def db_query(query, params=(), fetch=False):
+    conn = sqlite3.connect('finance_pro.db')
+    cur = conn.cursor()
+    cur.execute(query, params)
+    res = cur.fetchall() if fetch else None
+    conn.commit()
+    conn.close()
+    return res
+
+def init_db():
+    db_query("CREATE TABLE IF NOT EXISTS operations (id INTEGER PRIMARY KEY, user_id INTEGER, type TEXT, amount REAL, category TEXT, currency TEXT, date TEXT)")
+    db_query("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, currency TEXT)")
+
+# --- КЛАВИАТУРЫ ---
 def get_currency_kb():
-    buttons = [
-        [InlineKeyboardButton(text="USD 💵", callback_data="set_curr_USD"),
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="USD 💵", callback_data="set_curr_USD"), 
          InlineKeyboardButton(text="RUB ₽", callback_data="set_curr_RUB")],
-        [InlineKeyboardButton(text="TMT 🇹🇲", callback_data="set_curr_TMT"),
+        [InlineKeyboardButton(text="TMT 🇹🇲", callback_data="set_curr_TMT"), 
          InlineKeyboardButton(text="THB 🇹🇭", callback_data="set_curr_THB")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    ])
 
 def get_main_kb():
-    buttons = [
-        [InlineKeyboardButton(text="📊 График", callback_data="get_chart"),
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 График", callback_data="get_chart"), 
          InlineKeyboardButton(text="📋 Отчет (CSV)", callback_data="export")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    ])
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
-    # Логируем для проверки в Railway Logs
-    print(f"Пользователь {message.from_user.id} нажал старт")
-    
-    # Сразу предлагаем валюту при старте
-    await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\n\n"
-        "Я твой финансовый бот. Чтобы начать, выбери свою валюту:",
-        reply_markup=get_currency_kb()
-    )
-    await state.set_state(Setup.choosing_currency)
-
-@dp.callback_query(Setup.choosing_currency, F.data.startswith("set_curr_"))
-async def set_currency(callback: types.CallbackQuery, state: FSMContext):
-    selected_curr = callback.data.split("_")[2]
-    
-    # Здесь можно добавить сохранение в БД
-    
-    await state.clear()
-    await callback.message.edit_text(
-        f"✅ Валюта **{selected_curr}** установлена!\n\n"
-        "Теперь ты можешь записывать расходы.\n"
-        "Просто напиши: `500 Еда` или отправь голос.",
-        reply_markup=get_main_kb(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    init_db()
+    user = db_query("SELECT currency FROM users WHERE user_id = ?",
