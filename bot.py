@@ -2,99 +2,85 @@ import asyncio
 import logging
 import sqlite3
 import os
-import csv
 import re
-import matplotlib.pyplot as plt
 import speech_recognition as sr
 from datetime import datetime
 from pydub import AudioSegment
-
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- ВСТАВЬ СВОЙ ТОКЕН ТУТ ---
-TOKEN = "8396694675:AAHHW21vA_aMH9AKYXGkFRLD-9BoUFdfgoE" 
+# --- ТВОЙ ТОКЕН ---
+TOKEN = "8396694675:AAHHW21vA_aMH9AKYXGkFRLD-9BoUFdfgoE"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 recognizer = sr.Recognizer()
 
-# Состояния для пошаговой работы
-class Setup(StatesGroup):
-    choosing_currency = State()
-    confirming_op = State() # Состояние подтверждения операции
-
 # --- БАЗА ДАННЫХ ---
-def db_query(query, params=(), fetch=False):
-    conn = sqlite3.connect('finance_pro.db')
-    cur = conn.cursor()
-    cur.execute(query, params)
-    res = cur.fetchall() if fetch else None
-    conn.commit()
-    conn.close()
-    return res
+def db_exec(query, params=()):
+    with sqlite3.connect('finance_pro.db') as conn:
+        cur = conn.cursor()
+        cur.execute(query, params)
+        conn.commit()
+        return cur.fetchall()
 
 def init_db():
-    db_query("CREATE TABLE IF NOT EXISTS operations (id INTEGER PRIMARY KEY, user_id INTEGER, type TEXT, amount REAL, category TEXT, currency TEXT, date TEXT)")
-    db_query("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, currency TEXT)")
+    db_exec("CREATE TABLE IF NOT EXISTS ops (id INTEGER PRIMARY KEY, user_id INTEGER, type TEXT, amount REAL, cat TEXT, date TEXT)")
+    db_exec("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, curr TEXT)")
 
 # --- КЛАВИАТУРЫ ---
-def get_currency_kb():
+def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="USD 💵", callback_data="set_curr_USD"), InlineKeyboardButton(text="RUB ₽", callback_data="set_curr_RUB")],
-        [InlineKeyboardButton(text="TMT 🇹🇲", callback_data="set_curr_TMT"), InlineKeyboardButton(text="THB 🇹🇭", callback_data="set_curr_THB")]
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="check_bal"),
+         InlineKeyboardButton(text="📊 История", callback_data="check_history")]
     ])
 
-def get_main_kb():
+def confirm_kb(amt, cat):
+    # Ограничиваем длину категории для корректной передачи в кнопках
+    cat_short = cat[:15].strip() or "Разное"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Мой Баланс", callback_data="get_balance")],
-        [InlineKeyboardButton(text="📊 Аналитика", callback_data="get_chart"), InlineKeyboardButton(text="📋 Отчет", callback_data="export")]
-    ])
-
-# Кнопки выбора: Расход или Доход
-def get_confirm_kb(amount, category):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"➕ Доход ({amount})", callback_data="op_plus"),
-         InlineKeyboardButton(text=f"➖ Расход ({amount})", callback_data="op_minus")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="op_cancel")]
+        [InlineKeyboardButton(text=f"➕ Доход ({amt})", callback_data=f"save:in:{amt}:{cat_short}"),
+         InlineKeyboardButton(text=f"➖ Расход ({amt})", callback_data=f"save:ex:{amt}:{cat_short}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message, state: FSMContext):
+async def cmd_start(message: types.Message):
     init_db()
-    user = db_query("SELECT currency FROM users WHERE user_id = ?", (message.from_user.id,), fetch=True)
-    if not user:
-        await message.answer("Привет! Давай настроим бота. Выбери валюту:", reply_markup=get_currency_kb())
-        await state.set_state(Setup.choosing_currency)
-    else:
-        await message.answer(f"Бот готов! Пришли текст (100 еда) или голос.", reply_markup=get_main_kb())
+    # По умолчанию ставим валюту TMT (можно сменить на USD)
+    db_exec("INSERT OR IGNORE INTO users (user_id, curr) VALUES (?, ?)", (message.from_user.id, "TMT"))
+    await message.answer(
+        f"Привет, {message.from_user.first_name}! 👋\n\n"
+        "Я помогу вести учет твоих финансов.\n"
+        "• Напиши: `500 такси` или `10000 премия`\n"
+        "• Или отправь **голосовое сообщение**.\n\n"
+        "Я спрошу, куда именно записать сумму!", 
+        reply_markup=main_kb()
+    )
 
-@dp.callback_query(Setup.choosing_currency, F.data.startswith("set_curr_"))
-async def set_currency(callback: types.CallbackQuery, state: FSMContext):
-    curr = callback.data.split("_")[2]
-    db_query("INSERT OR REPLACE INTO users (user_id, currency) VALUES (?, ?)", (callback.from_user.id, curr))
-    await state.clear()
-    await callback.message.edit_text(f"✅ Валюта {curr} установлена!", reply_markup=get_main_kb())
-
-# ОБРАБОТКА ТЕКСТА (Ручной ввод)
+# Обработка текста
 @dp.message(F.text)
-async def process_text(message: types.Message, state: FSMContext):
-    match = re.search(r"(\d+[\.,]?\d*)\s*(.*)", message.text)
-    if match:
-        amount = match.group(1).replace(",", ".")
-        category = match.group(2).strip() or "Прочее"
-        await state.update_data(temp_amount=amount, temp_category=category)
-        await message.answer(f"Куда добавить {amount} за '{category}'?", reply_markup=get_confirm_kb(amount, category))
-        await state.set_state(Setup.confirming_op)
+async def handle_text(message: types.Message):
+    # Ищем любую цифру в сообщении
+    match = re.search(r"(\d+[\.,]?\d*)", message.text)
+    if not match:
+        return await message.answer("Я не нашел сумму в твоем сообщении. Напиши, например: `300 ужин`.")
+    
+    amount = match.group(1).replace(",", ".")
+    category = message.text.replace(match.group(1), "").strip() or "Прочее"
+    
+    await message.answer(
+        f"💵 Сумма: **{amount}**\n📂 Категория: **{category}**\n\nКуда запишем?", 
+        reply_markup=confirm_kb(amount, category), 
+        parse_mode="Markdown"
+    )
 
-# ОБРАБОТКА ГОЛОСА
+# Обработка голоса
 @dp.message(F.voice)
-async def handle_voice(message: types.Message, state: FSMContext):
+async def handle_voice(message: types.Message):
     file = await bot.get_file(message.voice.file_id)
     o_path, w_path = f"v_{message.from_user.id}.ogg", f"v_{message.from_user.id}.wav"
     await bot.download_file(file.file_path, o_path)
@@ -106,77 +92,55 @@ async def handle_voice(message: types.Message, state: FSMContext):
             match = re.search(r"(\d+)", text)
             if match:
                 amount = match.group(1)
-                category = text.replace(amount, "").strip() or "Голос"
-                await state.update_data(temp_amount=amount, temp_category=category)
-                await message.answer(f"🎙 Распознал: '{text}'\nКуда записать?", reply_markup=get_confirm_kb(amount, category))
-                await state.set_state(Setup.confirming_op)
+                category = text.replace(amount, "").strip() or "Голосовой ввод"
+                await message.answer(
+                    f"🎙 Распознано: '{text}'\n\n"
+                    f"💵 Сумма: **{amount}**\n\nКуда запишем?", 
+                    reply_markup=confirm_kb(amount, category), 
+                    parse_mode="Markdown"
+                )
             else:
-                await message.answer(f"Распознал: '{text}', но не нашел сумму.")
-    except:
-        await message.answer("Не удалось разобрать голос.")
+                await message.answer(f"🎙 Текст: '{text}'\nСумму не нашел. Попробуй еще раз.")
+    except Exception:
+        await message.answer("Не удалось обработать голос. Попробуй сказать четче.")
     finally:
         for p in [o_path, w_path]:
             if os.path.exists(p): os.remove(p)
 
-# ПОДТВЕРЖДЕНИЕ ОПЕРАЦИИ (Кнопки Доход/Расход)
-@dp.callback_query(Setup.confirming_op, F.data.startswith("op_"))
-async def confirm_op(callback: types.CallbackQuery, state: FSMContext):
-    if callback.data == "op_cancel":
-        await state.clear()
-        await callback.message.edit_text("Операция отменена ❌", reply_markup=get_main_kb())
-        return
+# Сохранение в базу
+@dp.callback_query(F.data.startswith("save:"))
+async def save_op(callback: types.CallbackQuery):
+    _, op_type, amt, cat = callback.data.split(":")
+    val = float(amt) if op_type == "in" else -float(amt)
+    
+    db_exec("INSERT INTO ops (user_id, type, amount, cat, date) VALUES (?, ?, ?, ?, ?)",
+            (callback.from_user.id, op_type, val, cat, datetime.now().strftime("%d.%m %H:%M")))
+    
+    res_text = "💰 Доход" if op_type == "in" else "📉 Расход"
+    await callback.message.edit_text(
+        f"✅ **Записано!**\n\nТип: {res_text}\nСумма: {amt}\nКатегория: {cat}", 
+        reply_markup=main_kb(), 
+        parse_mode="Markdown"
+    )
 
-    data = await state.get_data()
-    amount = float(data['temp_amount'])
-    category = data['temp_category']
-    op_type = "income" if callback.data == "op_plus" else "expense"
+# Проверка баланса
+@dp.callback_query(F.data == "check_bal")
+async def get_balance(callback: types.CallbackQuery):
+    res = db_exec("SELECT SUM(amount) FROM ops WHERE user_id = ?", (callback.from_user.id,))
+    total = res[0][0] if res[0][0] else 0
+    inc = db_exec("SELECT SUM(amount) FROM ops WHERE user_id = ? AND amount > 0", (callback.from_user.id,))[0][0] or 0
+    exp = db_exec("SELECT SUM(amount) FROM ops WHERE user_id = ? AND amount < 0", (callback.from_user.id,))[0][0] or 0
     
-    user_curr = db_query("SELECT currency FROM users WHERE user_id = ?", (callback.from_user.id,), fetch=True)
-    curr = user_curr[0][0] if user_curr else ""
-
-    # В базе расходы храним как минус, доходы как плюс
-    final_amount = amount if op_type == "income" else -amount
-    db_query("INSERT INTO operations (user_id, type, amount, category, currency, date) VALUES (?, ?, ?, ?, ?, ?)",
-             (callback.from_user.id, op_type, final_amount, category, curr, datetime.now().strftime("%Y-%m-%d")))
-    
-    status = "➕ Доход" if op_type == "income" else "➖ Расход"
-    await callback.message.edit_text(f"✅ Сохранено в {status}: {amount} {curr}\nКатегория: {category}", reply_markup=get_main_kb())
-    await state.clear()
-
-# БАЛАНС
-@dp.callback_query(F.data == "get_balance")
-async def show_balance(callback: types.CallbackQuery):
-    user_curr = db_query("SELECT currency FROM users WHERE user_id = ?", (callback.from_user.id,), fetch=True)
-    curr = user_curr[0][0] if user_curr else ""
-    
-    rows = db_query("SELECT SUM(amount) FROM operations WHERE user_id = ?", (callback.from_user.id,), fetch=True)
-    balance = rows[0][0] if rows[0][0] else 0
-    
-    # Детализация
-    inc = db_query("SELECT SUM(amount) FROM operations WHERE user_id = ? AND type = 'income'", (callback.from_user.id,), fetch=True)[0][0] or 0
-    exp = db_query("SELECT SUM(amount) FROM operations WHERE user_id = ? AND type = 'expense'", (callback.from_user.id,), fetch=True)[0][0] or 0
-    
-    text = (f"🏦 **Ваш баланс:** `{balance:,.2f} {curr}`\n\n"
-            f"📈 Доходы: `+{inc:,.2f}`\n"
-            f"📉 Расходы: `{exp:,.2f}`")
-    
-    await callback.message.answer(text, parse_mode="Markdown", reply_markup=get_main_kb())
+    text = (f"🏦 **Ваш кошелек:**\n\n"
+            f"💰 Итого: `{total:,.2f}`\n\n"
+            f"➕ Всего доходов: `{inc:,.2f}`\n"
+            f"➖ Всего расходов: `{abs(exp):,.2f}`")
+    await callback.message.answer(text, parse_mode="Markdown", reply_markup=main_kb())
     await callback.answer()
 
-# ГРАФИК
-@dp.callback_query(F.data == "get_chart")
-async def send_chart(callback: types.CallbackQuery):
-    rows = db_query("SELECT category, SUM(ABS(amount)) FROM operations WHERE user_id = ? AND type = 'expense' GROUP BY category", (callback.from_user.id,), fetch=True)
-    if not rows: return await callback.answer("Расходов для графика нет!")
-
-    plt.figure(figsize=(6, 4))
-    plt.pie([r[1] for r in rows], labels=[r[0] for r in rows], autopct='%1.1f%%')
-    plt.title("Твои расходы")
-    path = f"c_{callback.from_user.id}.png"
-    plt.savefig(path)
-    plt.close()
-    await callback.message.answer_photo(FSInputFile(path), caption="📊 Аналитика расходов")
-    os.remove(path)
+@dp.callback_query(F.data == "cancel")
+async def cancel_op(callback: types.CallbackQuery):
+    await callback.message.edit_text("Действие отменено. Жду новых команд.", reply_markup=main_kb())
 
 async def main():
     logging.basicConfig(level=logging.INFO)
