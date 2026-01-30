@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 # --- КОНФИГ ---
-TOKEN = "8396694675:AAHHW21vA_aMH9AKYXGkFRLD-9BoUFdfgoE"
+TOKEN = "8396694675:AAHHW21vA_aMH9AKYXGkFRD-9BoUFdfgoE"
 ADMIN_USERNAME = "pythonbabe" # Твой ник без @
 
 bot = Bot(token=TOKEN)
@@ -191,3 +191,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
