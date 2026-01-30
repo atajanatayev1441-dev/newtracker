@@ -15,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
 # Настройки
-TOKEN = os.getenv("BOT_TOKEN", "8263345320:AAFr3_tHDhX_x0eNywQkq-SCXBTQG7avYvk")
+TOKEN = os.getenv("BOT_TOKEN", "8396694675:AAHHW21vA_aMH9AKYXGkFRLD-9BoUFdfgoE")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 recognizer = sr.Recognizer()
@@ -86,3 +86,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
