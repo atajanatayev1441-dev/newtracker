@@ -62,6 +62,17 @@ def get_main_kb():
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(CommandStart())
+@dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     init_db()
-    user = db_query("SELECT currency FROM users WHERE user_id = ?",
+    # Проверяем, есть ли пользователь в базе
+    user = db_query("SELECT currency FROM users WHERE user_id = ?", (message.from_user.id,), fetch=True)
+    
+    if not user:
+        await message.answer("Добро пожаловать! 👋\nВыберите вашу основную валюту:", reply_markup=get_currency_kb())
+        await state.set_state(Setup.choosing_currency)
+    else:
+        curr = user[0][0]
+        await message.answer(f"Бот готов. Ваша валюта: {curr}\n\nВведите 'Сумма Категория' (например: `500 Еда`) или отправьте голосовое сообщение.", 
+                             reply_markup=get_main_kb())
+
